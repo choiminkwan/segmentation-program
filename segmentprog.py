@@ -1,6 +1,7 @@
 # segmentprog.py
 # 폴더 기반 로딩(원본/마스크), 인덱스 페어링(O↔M), 방향키로 세트 이동, Save All(일괄 저장)
-# Pen 미리보기 매끈화, 한/영 단축키, 줌/투명도(%), 더블클릭 완료 후 잔여클릭 차단(Enter는 차단X)
+# Pen 미리보기 매끈화, 한/영 단축키, 줌/투명도(%), 밝기/명암 조절
+# Opacity / Brightness / Contrast 헤더 1:1:1 배치, 슬라이더-수치 간격 축소
 
 import sys, os, glob
 import numpy as np
@@ -32,6 +33,24 @@ def np_to_qimage_rgba(img_rgba: np.ndarray) -> QImage:
 def is_image(path: str) -> bool:
     ext = os.path.splitext(path)[1].lower()
     return ext in [".jpg",".jpeg",".png",".bmp",".tif",".tiff"]
+
+def apply_brightness_contrast(rgb: np.ndarray, brightness: int, contrast: int) -> np.ndarray:
+    if rgb is None:
+        return None
+    out = rgb.astype(np.int16)
+
+    # contrast: -100..100  (표준 팩터)
+    if contrast != 0:
+        c = float(contrast)
+        factor = (259 * (c + 255)) / (255 * (259 - c))
+        out = factor * (out - 128) + 128
+
+    # brightness: -100..100
+    if brightness != 0:
+        out = out + int(brightness)
+
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    return out
 
 # ---------- 1:1 라벨 ----------
 class ImageLabel(QLabel):
@@ -76,7 +95,7 @@ class PairItem:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Dental Mask Editor — Folders + Arrow-Key Sets + Batch Save")
+        self.setWindowTitle("Mask Editor")
         self.resize(1320, 860)
 
         # 상태
@@ -88,6 +107,10 @@ class MainWindow(QMainWindow):
         self.mode = "pen"          # pen / polygon
         self.draw_op = "add"       # add / sub
         self.brush_size = 14       # 1~30
+
+        # 밝기/명암
+        self.brightness = 0        # -100..100
+        self.contrast   = 0        # -100..100
 
         # 폴리곤 상태
         self.poly_points = []
@@ -127,13 +150,47 @@ class MainWindow(QMainWindow):
         hl.addWidget(btn_orig_dir); hl.addWidget(btn_mask_dir)
         hl.addStretch(1)
 
-        opbox = QFrame(); opl = QHBoxLayout(opbox); opl.setContentsMargins(0,0,0,0); opl.setSpacing(8)
+        # 공통으로 쓸 사이즈 설정
+        def make_slider():
+            s = QSlider(Qt.Horizontal)
+            s.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+            s.setMinimumWidth(220)
+            return s
+        def make_value_label():
+            lab = QLabel("0")
+            lab.setFixedWidth(44)
+            lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            return lab
+
+        # Opacity 그룹 (stretch=1)
+        opbox = QFrame(); opl = QHBoxLayout(opbox); opl.setContentsMargins(0,0,0,0); opl.setSpacing(4)
         opl.addWidget(QLabel("Opacity"))
-        self.opacity_slider = QSlider(Qt.Horizontal); self.opacity_slider.setRange(0,255); self.opacity_slider.setValue(self.overlay_alpha)
+        self.opacity_slider = make_slider()
+        self.opacity_slider.setRange(0,255); self.opacity_slider.setValue(self.overlay_alpha)
         self.opacity_slider.valueChanged.connect(lambda v: self.set_overlay_alpha(v))
-        self.lbl_opacity = QLabel(self.opacity_text()); self.lbl_opacity.setMinimumWidth(44); self.lbl_opacity.setAlignment(Qt.AlignRight|Qt.AlignVCenter)
-        opl.addWidget(self.opacity_slider); opl.addWidget(self.lbl_opacity)
+        self.lbl_opacity = make_value_label(); self.lbl_opacity.setText(self.opacity_text())
+        opl.addWidget(self.opacity_slider, 1); opl.addWidget(self.lbl_opacity)
         hl.addWidget(opbox, 1)
+
+        # Brightness 그룹 (stretch=1)
+        bri_box = QFrame(); brl = QHBoxLayout(bri_box); brl.setContentsMargins(0,0,0,0); brl.setSpacing(4)
+        brl.addWidget(QLabel("Brightness"))
+        self.bri_slider = make_slider()
+        self.bri_slider.setRange(-100, 100); self.bri_slider.setValue(self.brightness)
+        self.bri_slider.valueChanged.connect(self.set_brightness)
+        self.lbl_bri = make_value_label(); self.lbl_bri.setText(str(self.brightness))
+        brl.addWidget(self.bri_slider, 1); brl.addWidget(self.lbl_bri)
+        hl.addWidget(bri_box, 1)
+
+        # Contrast 그룹 (stretch=1)
+        con_box = QFrame(); col = QHBoxLayout(con_box); col.setContentsMargins(0,0,0,0); col.setSpacing(4)
+        col.addWidget(QLabel("Contrast"))
+        self.con_slider = make_slider()
+        self.con_slider.setRange(-100, 100); self.con_slider.setValue(self.contrast)
+        self.con_slider.valueChanged.connect(self.set_contrast)
+        self.lbl_con = make_value_label(); self.lbl_con.setText(str(self.contrast))
+        col.addWidget(self.con_slider, 1); col.addWidget(self.lbl_con)
+        hl.addWidget(con_box, 1)
 
         btn_save_all = QPushButton("Save All"); btn_save_all.setObjectName("Primary"); btn_save_all.clicked.connect(self.on_save_all)
         hl.addWidget(btn_save_all)
@@ -181,7 +238,7 @@ class MainWindow(QMainWindow):
         self.tools_tabs.addTab(poly_tab, "Polygon")
 
         ll.addWidget(self.tools_tabs)
-        ll.addWidget(QLabel("Dataset (Original ↔ Mask)", objectName="SectionTitle"))
+        ll.addWidget(QLabel("Dataset", objectName="SectionTitle"))
         self.list_pairs = QListWidget()
         self.list_pairs.itemDoubleClicked.connect(self.on_open_selected_pair)
         ll.addWidget(self.list_pairs, 1)
@@ -191,7 +248,7 @@ class MainWindow(QMainWindow):
         rl = QVBoxLayout(right_panel); rl.setContentsMargins(12,12,12,12); rl.setSpacing(8)
 
         title_bar = QFrame(); tbar = QHBoxLayout(title_bar); tbar.setContentsMargins(0,0,0,0); tbar.setSpacing(8)
-        right_title = QLabel("Canvas (Original + Mask Overlay)", objectName="SectionTitle")
+        right_title = QLabel("Canvas", objectName="SectionTitle")
         tbar.addWidget(right_title); tbar.addStretch(1)
         zoom_box = QFrame(); zl = QHBoxLayout(zoom_box); zl.setContentsMargins(0,0,0,0); zl.setSpacing(6)
         self.btn_zoom_out = QPushButton("–"); self.btn_zoom_out.setFixedWidth(36); self.btn_zoom_out.clicked.connect(self.zoom_out)
@@ -255,7 +312,7 @@ class MainWindow(QMainWindow):
         QtWidgets.QShortcut(QtGui.QKeySequence(Qt.Key_Enter),  self, activated=lambda: self.finish_polygon(True, False))
         QtWidgets.QShortcut(QtGui.QKeySequence(Qt.Key_Escape), self, activated=lambda: self.finish_polygon(False, False))
         QtWidgets.QShortcut(QtGui.QKeySequence(Qt.Key_Backspace), self, activated=self.on_ctrl_z)
-        # 방향키 세트 이동 (왼/위: 이전, 오/아래: 다음)
+        # 방향키 세트 이동
         QtWidgets.QShortcut(QtGui.QKeySequence(Qt.Key_Left),  self, activated=self.prev_pair)
         QtWidgets.QShortcut(QtGui.QKeySequence(Qt.Key_Up),    self, activated=self.prev_pair)
         QtWidgets.QShortcut(QtGui.QKeySequence(Qt.Key_Right), self, activated=self.next_pair)
@@ -264,7 +321,7 @@ class MainWindow(QMainWindow):
         self.installEventFilter(self)
         self.set_fill_mode(False)
 
-    # ===== 이벤트 필터(한/영 공통 + 방향키 글로벌 처리) =====
+    # ===== 이벤트 필터(한/영 공통 + 방향키 글로벌 처리 + 밝기/명암 단축키) =====
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.KeyPress:
             fw = QApplication.focusWidget()
@@ -300,6 +357,29 @@ class MainWindow(QMainWindow):
             # 투명도: <, >  (보조로 , . 도 허용)
             if ch in ("<", ","): self.change_opacity(-self.opacity_step); return True
             if ch in (">", "."): self.change_opacity(+self.opacity_step); return True
+
+            # === 밝기/명암 단축키 (한/영 겸용) ===
+            step = 5  # 한 번에 변화량
+
+            # 밝기: k(감소), l(증가) + 한글 자모(ㅏ, ㅣ)
+            if ch in ("k","K","ㅏ"):
+                if hasattr(self, "bri_slider"):
+                    self.bri_slider.setValue(max(-100, self.bri_slider.value() - step))
+                    return True
+            if ch in ("l","L","ㅣ"):
+                if hasattr(self, "bri_slider"):
+                    self.bri_slider.setValue(min(100, self.bri_slider.value() + step))
+                    return True
+
+            # 명암: ;(감소), '(증가) (Shift로 : / " 도 허용)
+            if key == Qt.Key_Semicolon or ch in (";", ":"):
+                if hasattr(self, "con_slider"):
+                    self.con_slider.setValue(max(-100, self.con_slider.value() - step))
+                    return True
+            if (hasattr(Qt, "Key_Apostrophe") and key == Qt.Key_Apostrophe) or ch in ("'", '"'):
+                if hasattr(self, "con_slider"):
+                    self.con_slider.setValue(min(100, self.con_slider.value() + step))
+                    return True
 
         return super().eventFilter(obj, event)
 
@@ -492,7 +572,7 @@ class MainWindow(QMainWindow):
 
         QMessageBox.information(self, "Saved", f"Saved {saved} mask(s) to:\n{out_dir}")
 
-    # ===== 투명도/줌 =====
+    # ===== 투명도/밝기/명암/줌 =====
     def opacity_text(self) -> str:
         return f"{int(round(self.overlay_alpha * 100 / 255))}%"
 
@@ -504,6 +584,20 @@ class MainWindow(QMainWindow):
         self.overlay_alpha = int(max(0, min(255, v)))
         if hasattr(self, "lbl_opacity"):
             self.lbl_opacity.setText(self.opacity_text())
+        if self.img_rgb is not None:
+            self.refresh()
+
+    def set_brightness(self, v: int):
+        self.brightness = int(max(-100, min(100, v)))
+        if hasattr(self, "lbl_bri"):
+            self.lbl_bri.setText(str(self.brightness))
+        if self.img_rgb is not None:
+            self.refresh()
+
+    def set_contrast(self, v: int):
+        self.contrast = int(max(-100, min(100, v)))
+        if hasattr(self, "lbl_con"):
+            self.lbl_con.setText(str(self.contrast))
         if self.img_rgb is not None:
             self.refresh()
 
@@ -671,8 +765,12 @@ class MainWindow(QMainWindow):
     def refresh(self):
         if self.img_rgb is None:
             self.view_label.clear(); return
+
+        # 밝기/명암 반영된 베이스
+        base_rgb = apply_brightness_contrast(self.img_rgb, self.brightness, self.contrast)
+
         H, W = self.gray.shape
-        pix = QPixmap.fromImage(np_to_qimage_rgb(self.img_rgb))
+        pix = QPixmap.fromImage(np_to_qimage_rgb(base_rgb))
         painter = QtGui.QPainter(pix)
         try:
             if self.mode == "polygon" and len(self.poly_points) >= 1:
@@ -699,10 +797,14 @@ class MainWindow(QMainWindow):
         finally:
             painter.end()
 
+        # 줌 스케일 적용
         if abs(self.zoom - 1.0) > 1e-6:
-            sw = max(1, int(W * self.zoom)); sh = max(1, int(H * self.zoom))
+            sw = max(1, int(W * self.zoom))
+            sh = max(1, int(H * self.zoom))
             pix = pix.scaled(sw, sh, Qt.KeepAspectRatio, Qt.FastTransformation)
-        self.view_label.setPixmap(pix); self.view_label.setFixedSize(pix.size())
+
+        self.view_label.setPixmap(pix)
+        self.view_label.setFixedSize(pix.size())
 
 # ---------- 엔트리 ----------
 def main():
