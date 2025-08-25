@@ -2,6 +2,7 @@
 # 폴더 기반 로딩(원본/마스크), 인덱스 페어링(O↔M), 방향키로 세트 이동, Save All(일괄 저장)
 # Pen 미리보기 매끈화, 한/영 단축키, 줌/투명도(%), 밝기/명암 조절
 # Opacity / Brightness / Contrast 헤더 1:1:1 배치, 슬라이더-수치 간격 축소
+# 빈 캔버스에서 중앙의 흰 점 방지(라벨 숨김)
 
 import sys, os, glob
 import numpy as np
@@ -30,16 +31,12 @@ def np_to_qimage_rgba(img_rgba: np.ndarray) -> QImage:
     q = QImage(img_rgba.data, w, h, w * 4, QImage.Format_RGBA8888)
     return q.copy()
 
-def is_image(path: str) -> bool:
-    ext = os.path.splitext(path)[1].lower()
-    return ext in [".jpg",".jpeg",".png",".bmp",".tif",".tiff"]
-
 def apply_brightness_contrast(rgb: np.ndarray, brightness: int, contrast: int) -> np.ndarray:
     if rgb is None:
         return None
     out = rgb.astype(np.int16)
 
-    # contrast: -100..100  (표준 팩터)
+    # contrast: -100..100
     if contrast != 0:
         c = float(contrast)
         factor = (259 * (c + 255)) / (255 * (259 - c))
@@ -85,17 +82,17 @@ class ImageLabel(QLabel):
 
 # ---------- 페어 구조 ----------
 class PairItem:
-    def __init__(self, orig_path: str|None, mask_path: str|None):
+    def __init__(self, orig_path: str | None, mask_path: str | None):
         self.orig_path = orig_path
-        self.mask_path = mask_path  # 있을 수도, 없을 수도
-        self.mask_arr  = None       # 편집본(메모리)
+        self.mask_path = mask_path
+        self.mask_arr  = None
         self.modified  = False
 
 # ---------- 메인 ----------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Mask Editor")
+        self.setWindowTitle("Dental Mask Editor — Folders + Arrow-Key Sets + Batch Save")
         self.resize(1320, 860)
 
         # 상태
@@ -111,19 +108,22 @@ class MainWindow(QMainWindow):
         # 밝기/명암
         self.brightness = 0        # -100..100
         self.contrast   = 0        # -100..100
+        self.bc_step    = 5
 
         # 폴리곤 상태
         self.poly_points = []
         self.poly_active = False
         self.poly_click_block = False
 
-        self.undo_stack = []; self.max_undo = 30
+        # Undo
+        self.undo_stack = []
+        self.max_undo = 30
 
         # 폴더/페어
         self.dir_originals = None
         self.dir_masks     = None
         self.pairs: list[PairItem] = []
-        self.current_pair_idx = None  # 현재 표시중인 페어 인덱스
+        self.current_pair_idx = None
 
         # Pen 프리뷰(매끈화)
         self.pen_base_mask = None
@@ -162,17 +162,17 @@ class MainWindow(QMainWindow):
             lab.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             return lab
 
-        # Opacity 그룹 (stretch=1)
+        # Opacity (stretch=1)
         opbox = QFrame(); opl = QHBoxLayout(opbox); opl.setContentsMargins(0,0,0,0); opl.setSpacing(4)
         opl.addWidget(QLabel("Opacity"))
         self.opacity_slider = make_slider()
         self.opacity_slider.setRange(0,255); self.opacity_slider.setValue(self.overlay_alpha)
-        self.opacity_slider.valueChanged.connect(lambda v: self.set_overlay_alpha(v))
+        self.opacity_slider.valueChanged.connect(self.set_overlay_alpha)
         self.lbl_opacity = make_value_label(); self.lbl_opacity.setText(self.opacity_text())
         opl.addWidget(self.opacity_slider, 1); opl.addWidget(self.lbl_opacity)
         hl.addWidget(opbox, 1)
 
-        # Brightness 그룹 (stretch=1)
+        # Brightness (stretch=1)
         bri_box = QFrame(); brl = QHBoxLayout(bri_box); brl.setContentsMargins(0,0,0,0); brl.setSpacing(4)
         brl.addWidget(QLabel("Brightness"))
         self.bri_slider = make_slider()
@@ -182,7 +182,7 @@ class MainWindow(QMainWindow):
         brl.addWidget(self.bri_slider, 1); brl.addWidget(self.lbl_bri)
         hl.addWidget(bri_box, 1)
 
-        # Contrast 그룹 (stretch=1)
+        # Contrast (stretch=1)
         con_box = QFrame(); col = QHBoxLayout(con_box); col.setContentsMargins(0,0,0,0); col.setSpacing(4)
         col.addWidget(QLabel("Contrast"))
         self.con_slider = make_slider()
@@ -238,7 +238,7 @@ class MainWindow(QMainWindow):
         self.tools_tabs.addTab(poly_tab, "Polygon")
 
         ll.addWidget(self.tools_tabs)
-        ll.addWidget(QLabel("Dataset", objectName="SectionTitle"))
+        ll.addWidget(QLabel("Dataset (Original ↔ Mask)", objectName="SectionTitle"))
         self.list_pairs = QListWidget()
         self.list_pairs.itemDoubleClicked.connect(self.on_open_selected_pair)
         ll.addWidget(self.list_pairs, 1)
@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
         rl = QVBoxLayout(right_panel); rl.setContentsMargins(12,12,12,12); rl.setSpacing(8)
 
         title_bar = QFrame(); tbar = QHBoxLayout(title_bar); tbar.setContentsMargins(0,0,0,0); tbar.setSpacing(8)
-        right_title = QLabel("Canvas", objectName="SectionTitle")
+        right_title = QLabel("Canvas (Original + Mask Overlay)", objectName="SectionTitle")
         tbar.addWidget(right_title); tbar.addStretch(1)
         zoom_box = QFrame(); zl = QHBoxLayout(zoom_box); zl.setContentsMargins(0,0,0,0); zl.setSpacing(6)
         self.btn_zoom_out = QPushButton("–"); self.btn_zoom_out.setFixedWidth(36); self.btn_zoom_out.clicked.connect(self.zoom_out)
@@ -262,6 +262,10 @@ class MainWindow(QMainWindow):
         self.view_label.sig_click_drag.connect(self.on_paint_or_click)
         self.view_label.sig_release.connect(self.on_stroke_end)
         self.view_label.sig_dbl.connect(lambda: self.finish_polygon(True, True))  # 더블클릭만 1클릭 무시
+        # 빈 이미지일 때 1px 흰 점 방지
+        self.view_label.setAutoFillBackground(False)
+        self.view_label.setStyleSheet("background: transparent;")
+        self.view_label.setVisible(False)
 
         self.scroll = QScrollArea(); self.scroll.setWidget(self.view_label); self.scroll.setWidgetResizable(False)
         self.scroll.setAlignment(Qt.AlignCenter)
@@ -321,7 +325,7 @@ class MainWindow(QMainWindow):
         self.installEventFilter(self)
         self.set_fill_mode(False)
 
-    # ===== 이벤트 필터(한/영 공통 + 방향키 글로벌 처리 + 밝기/명암 단축키) =====
+    # ===== 이벤트 필터(한/영 공통 + 글로벌 키) =====
     def eventFilter(self, obj, event):
         if event.type() == QtCore.QEvent.KeyPress:
             fw = QApplication.focusWidget()
@@ -335,7 +339,7 @@ class MainWindow(QMainWindow):
             if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
                 return super().eventFilter(obj, event)
 
-            # 글로벌 방향키: 세트 이동
+            # 방향키: 세트 이동
             if key in (Qt.Key_Left, Qt.Key_Up):
                 self.prev_pair(); return True
             if key in (Qt.Key_Right, Qt.Key_Down):
@@ -354,32 +358,16 @@ class MainWindow(QMainWindow):
             if ch in ("+","="): self.zoom_in(); return True
             if ch in ("-","_"): self.zoom_out(); return True
 
-            # 투명도: <, >  (보조로 , . 도 허용)
+            # 투명도: <, >
             if ch in ("<", ","): self.change_opacity(-self.opacity_step); return True
             if ch in (">", "."): self.change_opacity(+self.opacity_step); return True
 
-            # === 밝기/명암 단축키 (한/영 겸용) ===
-            step = 5  # 한 번에 변화량
-
-            # 밝기: k(감소), l(증가) + 한글 자모(ㅏ, ㅣ)
-            if ch in ("k","K","ㅏ"):
-                if hasattr(self, "bri_slider"):
-                    self.bri_slider.setValue(max(-100, self.bri_slider.value() - step))
-                    return True
-            if ch in ("l","L","ㅣ"):
-                if hasattr(self, "bri_slider"):
-                    self.bri_slider.setValue(min(100, self.bri_slider.value() + step))
-                    return True
-
-            # 명암: ;(감소), '(증가) (Shift로 : / " 도 허용)
-            if key == Qt.Key_Semicolon or ch in (";", ":"):
-                if hasattr(self, "con_slider"):
-                    self.con_slider.setValue(max(-100, self.con_slider.value() - step))
-                    return True
-            if (hasattr(Qt, "Key_Apostrophe") and key == Qt.Key_Apostrophe) or ch in ("'", '"'):
-                if hasattr(self, "con_slider"):
-                    self.con_slider.setValue(min(100, self.con_slider.value() + step))
-                    return True
+            # 밝기: k/l (한글 ㅏ/ㅣ 포함)
+            if ch in ("k","K","ㅏ"): self.set_brightness(self.brightness - self.bc_step); self.bri_slider.setValue(self.brightness); return True
+            if ch in ("l","L","ㅣ"): self.set_brightness(self.brightness + self.bc_step); self.bri_slider.setValue(self.brightness); return True
+            # 명암: ; / '
+            if ch in (";",):        self.set_contrast(self.contrast - self.bc_step); self.con_slider.setValue(self.contrast); return True
+            if ch in ("'", '"'):    self.set_contrast(self.contrast + self.bc_step); self.con_slider.setValue(self.contrast); return True
 
         return super().eventFilter(obj, event)
 
@@ -398,9 +386,6 @@ class MainWindow(QMainWindow):
 
     # ===== 페어 빌드 (파일명 무시, 인덱스 기준) =====
     def rebuild_pairs(self):
-        """원본/마스크 폴더에서 파일명을 무시하고
-           정렬 순서대로 인덱스 매칭(0↔0, 1↔1, …)으로 페어를 만들고
-           좌측 리스트에 원본→마스크 교차로 표시"""
         self.commit_current_mask_to_pair()
 
         self.pairs.clear()
@@ -431,26 +416,15 @@ class MainWindow(QMainWindow):
             self.pairs.append(PairItem(op, mp))
 
         for i, pair in enumerate(self.pairs):
-            if pair.orig_path:
-                o_item = QListWidgetItem(f"O: {os.path.basename(pair.orig_path)}")
-            else:
-                o_item = QListWidgetItem("O: (none)")
-            o_item.setData(Qt.UserRole, i)
-            self.list_pairs.addItem(o_item)
-
-            if pair.mask_path:
-                m_item = QListWidgetItem(f"M: {os.path.basename(pair.mask_path)}")
-            else:
-                m_item = QListWidgetItem("M: (none)")
-            m_item.setData(Qt.UserRole, i)
-            self.list_pairs.addItem(m_item)
+            o_item = QListWidgetItem(f"O: {os.path.basename(pair.orig_path)}" if pair.orig_path else "O: (none)")
+            o_item.setData(Qt.UserRole, i); self.list_pairs.addItem(o_item)
+            m_item = QListWidgetItem(f"M: {os.path.basename(pair.mask_path)}" if pair.mask_path else "M: (none)")
+            m_item.setData(Qt.UserRole, i); self.list_pairs.addItem(m_item)
 
         if self.pairs:
-            # 가능한 첫 원본 있는 세트로 자동 로드
             first_idx = 0
             for idx, p in enumerate(self.pairs):
-                if p.orig_path:
-                    first_idx = idx; break
+                if p.orig_path: first_idx = idx; break
             self.load_pair_into_canvas(first_idx)
             self.update_pair_selection()
 
@@ -461,14 +435,12 @@ class MainWindow(QMainWindow):
         self.update_pair_selection()
 
     def update_pair_selection(self):
-        """좌측 리스트에서 현재 세트의 'O:' 항목을 하이라이트"""
         if self.current_pair_idx is None: return
-        row = self.current_pair_idx * 2  # O 항목
+        row = self.current_pair_idx * 2
         if 0 <= row < self.list_pairs.count():
             self.list_pairs.setCurrentRow(row)
 
     def load_pair_into_canvas(self, idx: int):
-        """현재 페어 커밋 → idx 페어 로드(원본/마스크)"""
         if idx < 0 or idx >= len(self.pairs): return
         self.commit_current_mask_to_pair()
 
@@ -476,7 +448,7 @@ class MainWindow(QMainWindow):
         if not pair.orig_path:
             QMessageBox.information(self, "Info", "This pair has no original image."); return
 
-        # 원본 로드
+        # 원본
         bgr = cv2.imread(pair.orig_path, cv2.IMREAD_COLOR)
         if bgr is None:
             QMessageBox.critical(self, "Error", f"Failed to load image: {pair.orig_path}"); return
@@ -484,7 +456,7 @@ class MainWindow(QMainWindow):
         self.img_rgb = rgb
         self.gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
-        # 마스크 로드(메모리 우선 → 파일 → 빈)
+        # 마스크
         if pair.mask_arr is not None and pair.mask_arr.shape == self.gray.shape:
             self.mask = pair.mask_arr.copy()
         else:
@@ -504,10 +476,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded set {idx+1}/{len(self.pairs)}", 1500)
 
     def commit_current_mask_to_pair(self):
-        """현재 캔버스의 마스크를 현 페어에 저장(수정 표시)"""
-        if self.current_pair_idx is None: return
-        if self.mask is None: return
-        if self.current_pair_idx < 0 or self.current_pair_idx >= len(self.pairs): return
+        if self.current_pair_idx is None or self.mask is None: return
+        if not (0 <= self.current_pair_idx < len(self.pairs)): return
         pair = self.pairs[self.current_pair_idx]
         if pair.mask_arr is None or not np.array_equal(pair.mask_arr, self.mask):
             pair.mask_arr = self.mask.copy()
@@ -553,7 +523,6 @@ class MainWindow(QMainWindow):
 
         saved = 0
         for p in modified:
-            # 파일명: 기존 mask가 있으면 그 이름 유지, 없으면 원본 스템 + _mask.png
             if p.mask_path:
                 out_name = os.path.basename(p.mask_path)
             else:
@@ -568,7 +537,7 @@ class MainWindow(QMainWindow):
             else:
                 cv2.imwrite(out_path, m)
             saved += 1
-            p.modified = False  # 저장 완료 표시
+            p.modified = False
 
         QMessageBox.information(self, "Saved", f"Saved {saved} mask(s) to:\n{out_dir}")
 
@@ -698,7 +667,7 @@ class MainWindow(QMainWindow):
         if self.gray is None: return
         H, W = self.gray.shape
 
-        # 캔버스 좌표 → 이미지 좌표(줌 보정)
+        # 캔버스 → 이미지 좌표(줌 보정)
         z = max(1e-6, float(self.zoom))
         ix = int(x / z); iy = int(y / z)
         if ix < 0 or iy < 0 or ix >= W or iy >= H: return
@@ -763,8 +732,13 @@ class MainWindow(QMainWindow):
 
     # ===== 렌더 =====
     def refresh(self):
+        # 이미지 없으면 라벨을 숨겨 1px 흰 점 방지
         if self.img_rgb is None:
-            self.view_label.clear(); return
+            self.view_label.clear()
+            self.view_label.setVisible(False)
+            return
+
+        self.view_label.setVisible(True)
 
         # 밝기/명암 반영된 베이스
         base_rgb = apply_brightness_contrast(self.img_rgb, self.brightness, self.contrast)
@@ -789,15 +763,15 @@ class MainWindow(QMainWindow):
 
             if self.mask is not None and self.overlay_alpha > 0:
                 rgba = np.zeros((H, W, 4), dtype=np.uint8)
-                rgba[...,0] = 255
-                rgba[...,3] = (self.mask > 0).astype(np.uint8) * self.overlay_alpha
+                rgba[..., 0] = 255
+                rgba[..., 3] = (self.mask > 0).astype(np.uint8) * self.overlay_alpha
                 ov = QPixmap.fromImage(np_to_qimage_rgba(rgba))
                 painter.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
                 painter.drawPixmap(0, 0, ov)
         finally:
             painter.end()
 
-        # 줌 스케일 적용
+        # 줌
         if abs(self.zoom - 1.0) > 1e-6:
             sw = max(1, int(W * self.zoom))
             sh = max(1, int(H * self.zoom))
