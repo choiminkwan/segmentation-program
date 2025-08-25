@@ -92,7 +92,7 @@ class PairItem:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Dental Mask Editor — Folders + Arrow-Key Sets + Batch Save")
+        self.setWindowTitle("Dental Mask Editor")
         self.resize(1320, 860)
 
         # 상태
@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
         rl = QVBoxLayout(right_panel); rl.setContentsMargins(12,12,12,12); rl.setSpacing(8)
 
         title_bar = QFrame(); tbar = QHBoxLayout(title_bar); tbar.setContentsMargins(0,0,0,0); tbar.setSpacing(8)
-        right_title = QLabel("Canvas (Original + Mask Overlay)", objectName="SectionTitle")
+        right_title = QLabel("Canvas", objectName="SectionTitle")
         tbar.addWidget(right_title); tbar.addStretch(1)
         zoom_box = QFrame(); zl = QHBoxLayout(zoom_box); zl.setContentsMargins(0,0,0,0); zl.setSpacing(6)
         self.btn_zoom_out = QPushButton("–"); self.btn_zoom_out.setFixedWidth(36); self.btn_zoom_out.clicked.connect(self.zoom_out)
